@@ -3,8 +3,8 @@ import numpy as np
 import mlflow
 from mlflow.data.pandas_dataset import PandasDataset
 from time import gmtime, strftime
-from sklearn.preprocessing import MinMaxScaler, LabelEncoder
-
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder, OneHotEncoder
+import joblib
 def preprocess(
     input_data_s3_path,
     output_s3_prefix,
@@ -52,19 +52,28 @@ def preprocess(
 
         # Scale features
         scaled_features = ['pdays', 'previous', 'campaign']
-        df_model_data[scaled_features] = MinMaxScaler().fit_transform(df_model_data[scaled_features])
-
-        # Convert categorical variables to sets of indicators
-        df_model_data = pd.get_dummies(df_model_data, dtype=int)  
-    
-        # Replace "y_no" and "y_yes" with a single label column, and bring it to the front:
-        df_model_data = pd.concat(
-            [
-                df_model_data["y_yes"].rename(target_col),
-                df_model_data.drop(["y_no", "y_yes"], axis=1),
-            ],
-            axis=1,
-        )
+        scaler = MinMaxScaler()
+        df_model_data[scaled_features] = scaler.fit_transform(df_model_data[scaled_features])
+        
+        categorical_columns = ["job", "marital", "education", "default", "housing", "loan", "contact", "month", "day_of_week", "poutcome"]
+        
+        # Fit the OneHotEncoder
+        encoder = OneHotEncoder(sparse_output=False,dtype=int)
+        
+        # Fit and transform the categorical columns
+        one_hot_encoded = encoder.fit_transform(df_model_data[categorical_columns])
+        
+        # Create a DataFrame with the encoded columns
+        one_hot_df = pd.DataFrame(one_hot_encoded, 
+                              columns=encoder.get_feature_names_out(categorical_columns))
+        
+        # Concatenate the one-hot encoded columns with the original DataFrame
+        df_model_data = pd.concat([df_model_data.drop(categorical_columns, axis=1), one_hot_df], axis=1)
+        # Combine with other columns
+        df_model_data['y'] = df_model_data['y'].map({'yes': 1, 'no': 0})
+        
+        cols = ['y'] + [col for col in df_model_data.columns if col != 'y']
+        df_model_data = df_model_data[cols]
 
         model_dataset = mlflow.data.from_pandas(df_data)
         mlflow.log_input(model_dataset, context="model_dataset")
@@ -92,6 +101,9 @@ def preprocess(
         test_x_data_output_s3_path = f"{output_s3_prefix}/test/test_x.csv"
         test_y_data_output_s3_path = f"{output_s3_prefix}/test/test_y.csv"
         baseline_data_output_s3_path = f"{output_s3_prefix}/baseline/baseline.csv"
+
+        encoder_path = f"{output_s3_prefix}/artifacts_model/onehot_encoder.joblib"
+        scaler_path = f"{output_s3_prefix}/artifacts_model/scaler.joblib"
         
         # Upload datasets to S3
         train_data.to_csv(train_data_output_s3_path, index=False, header=False)
@@ -101,7 +113,9 @@ def preprocess(
         
         # We need the baseline dataset for model monitoring
         df_model_data.drop([target_col], axis=1).to_csv(baseline_data_output_s3_path, index=False, header=False)
-           
+
+        joblib.dump(encoder, encoder_path)
+        joblib.dump(scaler, scaler_path)
         print("## Data processing complete. Exiting.")
         
         return {
